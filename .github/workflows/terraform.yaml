@@ -4,10 +4,12 @@ on:
   pull_request:
     branches:
       - main
+      - uat
 
   push:
     branches:
       - main
+      - uat
 
 permissions:
   contents: read
@@ -16,7 +18,6 @@ permissions:
 env:
   TF_VERSION: "1.9.8"
 
-  # Azure Terraform Backend
   ARM_USE_OIDC: true
   ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
   ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
@@ -25,11 +26,45 @@ env:
 jobs:
 
   # ============================================================
-  # 1. TERRAFORM SECURITY + QUALITY SCAN
+  # 1. DETERMINE ENVIRONMENT
+  # ============================================================
+
+  setup:
+    name: Determine Environment
+    runs-on: ubuntu-latest
+
+    outputs:
+      environment: ${{ steps.env.outputs.environment }}
+      working_dir: ${{ steps.env.outputs.working_dir }}
+
+    steps:
+
+      - name: Determine Terraform Environment
+        id: env
+        shell: bash
+        run: |
+
+          if [[ "${{ github.base_ref }}" == "uat" ]]; then
+            echo "environment=uat" >> "$GITHUB_OUTPUT"
+            echo "working_dir=environments/uat" >> "$GITHUB_OUTPUT"
+
+          elif [[ "${{ github.ref }}" == "refs/heads/uat" ]]; then
+            echo "environment=uat" >> "$GITHUB_OUTPUT"
+            echo "working_dir=environments/uat" >> "$GITHUB_OUTPUT"
+
+          else
+            echo "environment=prod" >> "$GITHUB_OUTPUT"
+            echo "working_dir=environments/prod" >> "$GITHUB_OUTPUT"
+          fi
+
+
+  # ============================================================
+  # 2. SECURITY + QUALITY SCAN
   # ============================================================
 
   security-scan:
     name: Security & Quality Scan
+    needs: setup
     runs-on: ubuntu-latest
 
     steps:
@@ -60,10 +95,11 @@ jobs:
 
       # --------------------------------------------------------
       # Terraform Init
-      # Backend disabled for validation
+      # Backend disabled for scanning
       # --------------------------------------------------------
 
       - name: Terraform Init
+        working-directory: ${{ needs.setup.outputs.working_dir }}
         run: |
           terraform init -backend=false
 
@@ -72,6 +108,7 @@ jobs:
       # --------------------------------------------------------
 
       - name: Terraform Validate
+        working-directory: ${{ needs.setup.outputs.working_dir }}
         run: |
           terraform validate
 
@@ -83,22 +120,24 @@ jobs:
         uses: terraform-linters/setup-tflint@v4
 
       - name: Initialize TFLint
+        working-directory: ${{ needs.setup.outputs.working_dir }}
         run: |
           tflint --init
 
       - name: Run TFLint
+        working-directory: ${{ needs.setup.outputs.working_dir }}
         run: |
-          tflint --recursive
+          tflint
 
       # --------------------------------------------------------
-      # Trivy IaC Scan
+      # Trivy
       # --------------------------------------------------------
 
       - name: Trivy IaC Scan
         uses: aquasecurity/trivy-action@master
         with:
           scan-type: config
-          scan-ref: .
+          scan-ref: ${{ needs.setup.outputs.working_dir }}
           severity: HIGH,CRITICAL
           exit-code: 1
 
@@ -109,7 +148,7 @@ jobs:
       - name: Checkov Terraform Scan
         uses: bridgecrewio/checkov-action@master
         with:
-          directory: .
+          directory: ${{ needs.setup.outputs.working_dir }}
           framework: terraform
           soft_fail: false
 
@@ -124,12 +163,15 @@ jobs:
 
 
   # ============================================================
-  # 2. TERRAFORM PLAN
+  # 3. TERRAFORM PLAN
   # ============================================================
 
   terraform-plan:
     name: Terraform Plan
-    needs: security-scan
+    needs:
+      - setup
+      - security-scan
+
     runs-on: ubuntu-latest
 
     steps:
@@ -151,7 +193,7 @@ jobs:
           terraform_version: ${{ env.TF_VERSION }}
 
       # --------------------------------------------------------
-      # Azure Login using OIDC
+      # Azure OIDC Login
       # --------------------------------------------------------
 
       - name: Azure Login - OIDC
@@ -162,7 +204,7 @@ jobs:
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       # --------------------------------------------------------
-      # Verify Azure Authentication
+      # Verify Azure
       # --------------------------------------------------------
 
       - name: Verify Azure Login
@@ -171,10 +213,10 @@ jobs:
 
       # --------------------------------------------------------
       # Terraform Init
-      # Azure Storage Backend
       # --------------------------------------------------------
 
       - name: Terraform Init
+        working-directory: ${{ needs.setup.outputs.working_dir }}
         run: |
           terraform init
 
@@ -183,6 +225,7 @@ jobs:
       # --------------------------------------------------------
 
       - name: Terraform Validate
+        working-directory: ${{ needs.setup.outputs.working_dir }}
         run: |
           terraform validate
 
@@ -191,43 +234,55 @@ jobs:
       # --------------------------------------------------------
 
       - name: Terraform Plan
+        working-directory: ${{ needs.setup.outputs.working_dir }}
         run: |
           terraform plan \
             -out=tfplan
 
       # --------------------------------------------------------
-      # Convert Terraform Plan to JSON
+      # Terraform Plan JSON
       # --------------------------------------------------------
 
       - name: Terraform Show
+        working-directory: ${{ needs.setup.outputs.working_dir }}
         run: |
           terraform show \
             -json tfplan > tfplan.json
 
       # --------------------------------------------------------
-      # Upload Terraform Plan
+      # Upload Plan
       # --------------------------------------------------------
 
       - name: Upload Terraform Plan
         uses: actions/upload-artifact@v4
         with:
-          name: terraform-plan
+          name: terraform-plan-${{ needs.setup.outputs.environment }}
           path: |
-            tfplan
-            tfplan.json
+            ${{ needs.setup.outputs.working_dir }}/tfplan
+            ${{ needs.setup.outputs.working_dir }}/tfplan.json
           retention-days: 5
 
 
   # ============================================================
-  # 3. SCAN TERRAFORM PLAN
+  # 4. SCAN TERRAFORM PLAN
   # ============================================================
 
   terraform-plan-scan:
     name: Scan Terraform Plan
-    needs: terraform-plan
+    needs:
+      - setup
+      - terraform-plan
+
     runs-on: ubuntu-latest
 
     steps:
+
+      # --------------------------------------------------------
+      # Checkout
+      # --------------------------------------------------------
+
+      - name: Checkout Repository
+        uses: actions/checkout@v4
 
       # --------------------------------------------------------
       # Download Plan
@@ -236,7 +291,8 @@ jobs:
       - name: Download Terraform Plan
         uses: actions/download-artifact@v4
         with:
-          name: terraform-plan
+          name: terraform-plan-${{ needs.setup.outputs.environment }}
+          path: ${{ needs.setup.outputs.working_dir }}
 
       # --------------------------------------------------------
       # Checkov Plan Scan
@@ -245,22 +301,102 @@ jobs:
       - name: Checkov Terraform Plan Scan
         uses: bridgecrewio/checkov-action@master
         with:
-          file: tfplan.json
+          file: ${{ needs.setup.outputs.working_dir }}/tfplan.json
           framework: terraform_plan
           soft_fail: false
 
 
   # ============================================================
-  # 4. TERRAFORM APPLY
+  # 5. UAT APPLY
   # ============================================================
 
-  terraform-apply:
-    name: Terraform Apply
+  terraform-uat-apply:
+    name: Terraform Apply - UAT
     needs:
+      - setup
       - terraform-plan
       - terraform-plan-scan
 
-    # Apply ONLY on push to main
+    if: |
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/uat'
+
+    runs-on: ubuntu-latest
+
+    environment:
+      name: uat
+
+    steps:
+
+      # --------------------------------------------------------
+      # Checkout
+      # --------------------------------------------------------
+
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      # --------------------------------------------------------
+      # Setup Terraform
+      # --------------------------------------------------------
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      # --------------------------------------------------------
+      # Azure OIDC Login
+      # --------------------------------------------------------
+
+      - name: Azure Login - OIDC
+        uses: azure/login@v3
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # --------------------------------------------------------
+      # Terraform Init
+      # --------------------------------------------------------
+
+      - name: Terraform Init
+        working-directory: ${{ needs.setup.outputs.working_dir }}
+        run: |
+          terraform init
+
+      # --------------------------------------------------------
+      # Download Plan
+      # --------------------------------------------------------
+
+      - name: Download Terraform Plan
+        uses: actions/download-artifact@v4
+        with:
+          name: terraform-plan-uat
+          path: ${{ needs.setup.outputs.working_dir }}
+
+      # --------------------------------------------------------
+      # Terraform Apply
+      # --------------------------------------------------------
+
+      - name: Terraform Apply
+        working-directory: ${{ needs.setup.outputs.working_dir }}
+        run: |
+          terraform apply \
+            -auto-approve \
+            tfplan
+
+
+  # ============================================================
+  # 6. PROD APPLY
+  # ============================================================
+
+  terraform-prod-apply:
+    name: Terraform Apply - PROD
+    needs:
+      - setup
+      - terraform-plan
+      - terraform-plan-scan
+
     if: |
       github.event_name == 'push' &&
       github.ref == 'refs/heads/main'
@@ -268,14 +404,13 @@ jobs:
     runs-on: ubuntu-latest
 
     # ----------------------------------------------------------
-    # GitHub Environment
+    # Configure approval:
     #
-    # Configure manual approval in:
-    #
-    # Repository
-    #   → Settings
-    #   → Environments
-    #   → production
+    # GitHub
+    # → Settings
+    # → Environments
+    # → production
+    # → Required reviewers
     # ----------------------------------------------------------
 
     environment:
@@ -300,7 +435,7 @@ jobs:
           terraform_version: ${{ env.TF_VERSION }}
 
       # --------------------------------------------------------
-      # Azure Login using OIDC
+      # Azure OIDC Login
       # --------------------------------------------------------
 
       - name: Azure Login - OIDC
@@ -323,14 +458,27 @@ jobs:
       # --------------------------------------------------------
 
       - name: Terraform Init
+        working-directory: ${{ needs.setup.outputs.working_dir }}
         run: |
           terraform init
+
+      # --------------------------------------------------------
+      # Download Exact Plan
+      # --------------------------------------------------------
+
+      - name: Download Terraform Plan
+        uses: actions/download-artifact@v4
+        with:
+          name: terraform-plan-prod
+          path: ${{ needs.setup.outputs.working_dir }}
 
       # --------------------------------------------------------
       # Terraform Apply
       # --------------------------------------------------------
 
       - name: Terraform Apply
+        working-directory: ${{ needs.setup.outputs.working_dir }}
         run: |
           terraform apply \
-            -auto-approve
+            -auto-approve \
+            tfplan
