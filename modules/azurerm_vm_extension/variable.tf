@@ -1,3 +1,3 @@
 variable "vm_ids" {
-    type = map(string)
+  type = map(string)
 }

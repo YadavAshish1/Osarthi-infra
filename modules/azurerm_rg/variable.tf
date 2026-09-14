@@ -1,9 +1,9 @@
-variable rgs {
+variable "rgs" {
   type = map(object({
-    name     = string
+    name = string
   }))
 }
 
-variable location {
+variable "location" {
   type = string
 }

@@ -1,7 +1,7 @@
 variable "resource_groups" {
   description = "A map of resource group configurations for UAT environment."
   type = map(object({
-    name     = string
+    name = string
   }))
 }
 
@@ -43,13 +43,13 @@ variable "nics" {
 variable "vms" {
   description = "A map of virtual machine configurations for UAT environment."
   type = map(object({
-    name                  = string
-    resource_group_name   = string
-    location              = string
-    size                  = string
-    admin_username        = string
-    admin_password        = string
-    network_interface_id_key = string
+    name                            = string
+    resource_group_name             = string
+    location                        = string
+    size                            = string
+    admin_username                  = string
+    admin_password                  = string
+    network_interface_id_key        = string
     disable_password_authentication = bool
     os_disk = object({
       caching              = string

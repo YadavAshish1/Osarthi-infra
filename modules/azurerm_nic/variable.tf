@@ -5,7 +5,7 @@ variable "nic_config" {
     resource_group_name = string
     location            = string
     subnet_key          = string
-    ip_configuration    = object({
+    ip_configuration = object({
       name                          = string
       private_ip_address_allocation = string
       public_ip_address_id          = optional(string)
